@@ -1,0 +1,12 @@
+[package]
+name = "herald"
+version = "0.1.0"
+authors = ["adoo <Adoo@outlook.com>"]
+edition = "2018"
+
+[dependencies]
+rxrust= {path= "../rx_rs"}
+herald_derive = {path="./herald_derive", version="*"}
+
+
+[workspace]

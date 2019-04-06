@@ -1,0 +1,17 @@
+[package]
+name = "herald_derive"
+version = "0.1.0"
+authors = ["adoo <Adoo@outlook.com>"]
+edition = "2018"
+
+[dependencies]
+syn = { version = "1.0.12", features = ["full", "extra-traits"]}
+quote = "1.0.2"
+proc-macro2= "1.0.7"
+
+
+[lib]
+proc-macro = true
+
+[dev-dependencies]
+herald = {path="../", version="*"}
