@@ -5,7 +5,7 @@ authors = ["adoo <Adoo@outlook.com>"]
 edition = "2018"
 
 [dependencies]
-rxrust= {path= "../rx_rs"}
+rxrust = "0.7.2"
 herald_derive = {path="./herald_derive", version="*"}
 
 
