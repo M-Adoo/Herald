@@ -207,9 +207,11 @@ impl<'a> CodeGen<'a> {
                 }
             }
 
-            impl #impl_generics Herald<#c_life, Self, #ty_changes, ()> for #name #ty_generics #where_clause{
+            impl #impl_generics Herald<#c_life> for #name #ty_generics #where_clause{
+                type StateChange = #ty_changes;
+                type UserEvent = ();
                 #[inline]
-                fn herald(&mut self) -> &mut HeraldInfo<#c_life, Self, #ty_changes, ()> {
+                fn herald(&mut self) -> &mut HeraldInfo<#c_life, Self, Self::StateChange, Self::UserEvent> {
                     &mut self._herald_info
                 }
             }
