@@ -205,13 +205,14 @@ impl<'a> CodeGen<'a> {
                         events.send_event(self, event);
                     }
                 }
+            }
 
+            impl #impl_generics Herald<#c_life, Self, #ty_changes, ()> for #name #ty_generics #where_clause{
                 #[inline]
                 fn herald(&mut self) -> &mut HeraldInfo<#c_life, Self, #ty_changes, ()> {
                     &mut self._herald_info
                 }
             }
-
             impl #impl_generics Ident for #name #ty_generics #where_clause{}
 
         }

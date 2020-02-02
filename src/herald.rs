@@ -6,6 +6,10 @@ use rxrust::ops::FilterMap;
 use rxrust::prelude::*;
 use rxrust::subject::{SubjectMutRefValue, SubjectValue};
 
+pub trait Herald<'a, T, C, U> {
+    fn herald(&mut self) -> &mut HeraldInfo<'a, T, C, U>;
+}
+
 #[derive(Clone)]
 pub struct Change<T> {
     pub before: T,
