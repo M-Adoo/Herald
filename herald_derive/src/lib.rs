@@ -12,7 +12,6 @@ use syn::{
 
 const CISTERN_LIFETIME: &'static str = "'herald";
 const SKIP_META: &'static str = "skip";
-const RECURSION_META: &'static str = "recursion";
 
 #[proc_macro_attribute]
 pub fn herald(_attr: TokenStream, tokens: TokenStream) -> TokenStream {
@@ -20,7 +19,7 @@ pub fn herald(_attr: TokenStream, tokens: TokenStream) -> TokenStream {
     let code_gen = CodeGen::new(&mut stt);
     let herald_def = code_gen.gen_herald_def_tokens();
     let state_def = code_gen.gen_state_tokens();
-    let herald_impl = code_gen.gen_herald_impl_tokens();
+    let herald_impl = code_gen.genherald_impl_tokens();
     let fields_update_impl = code_gen.gen_fields_update();
 
     let tokens = quote! {
@@ -70,6 +69,7 @@ impl<'a> CodeGen<'a> {
     }
 
     fn gen_state_tokens(&self) -> impl ToTokens {
+        let names = self.herald_fields_name();
         let fields = self.map_states(|f| {
             let f_name = &f.ident;
             let ty = &f.ty;
@@ -81,12 +81,6 @@ impl<'a> CodeGen<'a> {
             let ty = &f.ty;
             quote! { pub #f_name: Option<Change<#ty>>, }
         });
-
-        let init = self.map_states(|f| {
-            let f_name = &f.ident;
-            quote! { #f_name: None, }
-        });
-        let change_init = init.clone();
 
         let state_type_name = self.state_ident();
         let state_change = self.state_change_ident();
@@ -108,7 +102,7 @@ impl<'a> CodeGen<'a> {
             impl #state_impl_generic Default for #state_type_name #state_ty_generics #state_where_clause{
                 fn default() -> #state_type_name #state_ty_generics {
                     #state_type_name {
-                        #(#init)*
+                        #(#names: None,)*
                     }
                 }
             }
@@ -116,8 +110,23 @@ impl<'a> CodeGen<'a> {
              impl #state_impl_generic  Default for #state_change #state_ty_generics #state_where_clause{
                 fn default() -> #state_change #state_ty_generics {
                     #state_change {
-                        #(#change_init)*
+                        #(#names: None,)*
                     }
+                }
+            }
+
+            impl #state_impl_generic  Commit for #state_change #state_ty_generics #state_where_clause{
+                fn merge(&mut self, other: &Self) {
+                    #(
+                        if let Some(ref v) = other.#names  {
+                            if let Some(ref mut chg) = self.#names  {
+                                assert!(chg.after == v.before);
+                                chg.after = v.after.clone();
+                            } else {
+                                self.#names = Some(v.clone())
+                            }
+                        }
+                    )*
                 }
             }
         }
@@ -127,43 +136,17 @@ impl<'a> CodeGen<'a> {
         let vis = &self.stt.vis;
         let fields = self.stt.fields.iter();
         let lifetime: GenericParam = parse_str(CISTERN_LIFETIME).unwrap();
-        let (_, ty_generics, where_clause) = self.stt.generics.split_for_impl();
-
-        let state_generic = self.states_generics();
-        let (_, generics, _) = state_generic.split_for_impl();
-        let state_change = self.state_change_ident();
-        let change_type = quote! { #state_change #generics };
+        let (impl_generic, ty_generics, where_clause) = self.stt.generics.split_for_impl();
 
         quote! {
-            #vis struct #name #ty_generics #where_clause {
+            #vis struct #name #impl_generic #where_clause {
                 #(#fields ,)*
-                _herald_info: HeraldInfo<#lifetime, #name #ty_generics, #change_type, ()>
+                herald_impl: HeraldImpl<#lifetime, #name #ty_generics>
             }
         }
     }
 
-    fn gen_set_field_expr(
-        batched: impl ToTokens,
-        name: &Ident,
-        v: impl ToTokens,
-    ) -> proc_macro2::TokenStream {
-        quote! {
-            if self.#name != #v {
-                let before = std::mem::replace(&mut self.#name, #v);
-                let after = self.#name.clone();
-                if let Some(ref mut change) = #batched.#name {
-                    change.after = after.clone();
-                } else {
-                    #batched.#name = Some(Change { before: before.clone(), after: after.clone() });
-                }
-                Some(Change { before, after })
-            } else {
-                None
-            }
-        }
-    }
-
-    fn gen_herald_impl_tokens(&self) -> impl ToTokens {
+    fn genherald_impl_tokens(&self) -> impl ToTokens {
         let name = &self.stt.ident;
         let state_name = self.state_ident();
         let state_change = self.state_change_ident();
@@ -172,51 +155,65 @@ impl<'a> CodeGen<'a> {
         let (impl_generics, ty_generics, where_clause) = self.stt.generics.split_for_impl();
         let state_generic = self.states_generics();
         let (_, state_ty_generics, _) = state_generic.split_for_impl();
-
-        let set_changes = self.map_states_ident(|name| {
-            let change = Self::gen_set_field_expr(quote! {batched}, name, quote! {v});
-            quote! {
-                if let Some(v) = states.#name {
-                    let change = #change;
-                    changed = changed || change.is_some();
-                    chgs.#name = change;
-                }
-            }
-        });
+        let names = self.herald_fields_name();
 
         let ty_states = quote! {#state_name #state_ty_generics};
         let ty_changes = quote! {#state_change #state_ty_generics};
         quote! {
             impl #impl_generics #name #ty_generics #where_clause{
-                fn update_states(&mut self, states: #ty_states) {
-                    let mut chgs = #state_change::default();
-                    let batched = self._herald_info.batched();
-                    let mut changed = false;
-                    #(#set_changes)*
-                    if changed {
-                        self.send_event(Event::ImmediateChange(chgs));
-                    }
-                }
 
-                fn send_event(&mut self, event: Event<#ty_changes,()>){
-                    unsafe {
-                        let p_mut: *mut HeraldInfo<'_, _, _, _> = &mut self._herald_info;
-                        let events = &mut *p_mut;
-                        events.send_event(self, event);
-                    }
+                fn emit_change(&mut self, chgs: #state_change #state_ty_generics) {
+                    let info = unsafe { &mut *(&mut self.herald_impl as *mut HeraldImpl<'_, _>) };
+                    info.emit_change(self, chgs);
                 }
             }
 
             impl #impl_generics Herald<#c_life> for #name #ty_generics #where_clause{
-                type StateChange = #ty_changes;
-                type UserEvent = ();
+                type C = #ty_changes;
+                type State = #ty_states;
+
+                fn commit(&mut self, states: Self::State) {
+                    if self.herald_impl.is_subscribed() {
+                        let mut chgs = #state_change::default();
+                        let mut changed = false;
+                        #(
+                            if let Some(v) = states.#names {
+                                let before = std::mem::replace(&mut self.#names, v);
+                                let change = Change { before, after: self.#names.clone() };
+                                chgs.#names = Some(change);
+                                changed = changed || true;
+                            }
+                        )*
+                        if changed {
+                            self.emit_change(chgs);
+                        }
+                    } else {
+                        #(
+                            if let Some(v) = states.#names {
+                                self.#names = v
+                            }
+                        )*
+                    }
+                }
                 #[inline]
-                fn herald(&mut self) -> &mut HeraldInfo<#c_life, Self, Self::StateChange, Self::UserEvent> {
-                    &mut self._herald_info
+                fn change_stream(&mut self) -> LocalSubject<#c_life, RefChangeEvent<#c_life, Self>, ()>
+                where
+                    Self: Sized
+                {
+                    self.herald_impl.change_stream()
+                }
+
+                #[inline]
+                fn batched_change_stream(
+                    &mut self,
+                    notifier: impl LocalObservable<#c_life, Err = ()> + Clone + #c_life,
+                ) -> LocalCloneBoxOp<#c_life, RefChangeEvent<#c_life, Self>, ()>
+                where
+                    Self: Sized
+                {
+                    self.herald_impl.batched_change_stream(notifier)
                 }
             }
-            impl #impl_generics Ident for #name #ty_generics #where_clause{}
-
         }
     }
 
@@ -230,7 +227,6 @@ impl<'a> CodeGen<'a> {
             let getter = format_ident!("get_{}", f_name);
             let setter = format_ident!("set_{}", f_name);
             let state_change = self.state_change_ident();
-            let set_field = Self::gen_set_field_expr(quote! {batched}, f_name, quote! {value});
             let tokens = quote! {
                 pub fn #getter(&self) -> &#ty{
                     &self.#f_name
@@ -238,12 +234,12 @@ impl<'a> CodeGen<'a> {
 
                 pub fn #setter(&mut self, value: #ty)-> &mut Self{
                     if self.#f_name != value {
-                        let batched = self._herald_info.batched();
-                        let change = #set_field;
-                        if change.is_some() {
+                        let before = std::mem::replace(&mut self.#f_name, value);
+                        if self.herald_impl.is_subscribed() {
+                            let change = Change { before, after: self.#f_name.clone() };
                             let mut chgs = #state_change::default();
-                            chgs.#f_name = change;
-                            self.send_event(Event::ImmediateChange(chgs));
+                            chgs.#f_name = Some(change);
+                            self.emit_change(chgs);
                         }
                     }
                     self
@@ -373,11 +369,11 @@ impl<'a> CodeGen<'a> {
         res
     }
 
-    fn map_states_ident(
-        &self,
-        map: impl Fn(&Ident) -> proc_macro2::TokenStream,
-    ) -> Vec<proc_macro2::TokenStream> {
-        self.map_states(|f| map(f.ident.as_ref().unwrap()))
+    fn herald_fields_name(&self) -> Vec<&Ident> {
+        self.states
+            .iter()
+            .map(|f| f.ident.as_ref().unwrap())
+            .collect::<Vec<_>>()
     }
 
     fn map_states(

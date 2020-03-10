@@ -1,15 +1,26 @@
-use crate::{events::Event, events::EventData, ident::Ident};
-
 pub use herald_derive::herald;
-use rxrust::ops::filter_map::FilterMapOp;
-use rxrust::ops::FilterMap;
-use rxrust::prelude::*;
-use rxrust::subject::{SubjectMutRefValue, SubjectValue};
+pub use rxrust::{ops::box_it::LocalCloneBoxOp, prelude::*, subject::LocalSubject};
+use std::cell::{Ref, RefCell, RefMut};
+use std::rc::Rc;
 
-pub trait Herald<'a>: Sized {
-    type StateChange;
-    type UserEvent;
-    fn herald(&mut self) -> &mut HeraldInfo<'a, Self, Self::StateChange, Self::UserEvent>;
+/// the latest changes from the self type.
+pub trait Commit {
+    fn merge(&mut self, other: &Self);
+}
+
+pub trait Herald<'a> {
+    type C: Commit + Default;
+    type State;
+    fn commit(&mut self, state: Self::State);
+    fn change_stream(&mut self) -> LocalSubject<'a, RefChangeEvent<'a, Self>, ()>
+    where
+        Self: Sized;
+    fn batched_change_stream(
+        &mut self,
+        notifier: impl LocalObservable<'a, Err = ()> + Clone + 'a,
+    ) -> LocalCloneBoxOp<'a, RefChangeEvent<'a, Self>, ()>
+    where
+        Self: Sized;
 }
 
 #[derive(Clone)]
@@ -18,186 +29,121 @@ pub struct Change<T> {
     pub after: T,
 }
 
-pub struct ChangeEvent<'a, T, C> {
-    host: &'a mut T,
-    changes: &'a mut C,
+pub struct ChangeEvent<'a, T: Herald<'a>> {
+    pub host: &'a mut T,
+    pub changes: T::C,
 }
 
-impl<'a, T, C> ChangeEvent<'a, T, C> {
-    #[inline]
-    pub fn host(&mut self) -> &mut T {
-        self.host
-    }
-    #[inline]
-    pub fn changes(&mut self) -> &mut C {
-        self.changes
+pub struct RefChangeEvent<'a, T: Herald<'a>>(Rc<RefCell<ChangeEvent<'a, T>>>);
+
+impl<'a, T: Herald<'a>> Clone for RefChangeEvent<'a, T> {
+    fn clone(&self) -> Self {
+        RefChangeEvent(self.0.clone())
     }
 }
 
-pub struct HeraldInfo<'a, T, C, U> {
-    changes: Option<C>,
-    events: LocalSubject<'a, SubjectMutRefValue<EventData<'a, T, C, U>>, SubjectValue<()>>,
+impl<'a, T: Herald<'a>> PayloadCopy for RefChangeEvent<'a, T> {}
+
+impl<'a, T: Herald<'a>> RefChangeEvent<'a, T> {
+    pub fn new(host: &'a mut T, changes: T::C) -> Self {
+        RefChangeEvent(Rc::new(RefCell::new(ChangeEvent { host, changes })))
+    }
+
+    #[inline]
+    pub fn borrow_mut(&self) -> RefMut<'_, ChangeEvent<'a, T>> {
+        self.0.borrow_mut()
+    }
+
+    #[inline]
+    pub fn borrow(&self) -> Ref<'_, ChangeEvent<'a, T>> {
+        self.0.borrow()
+    }
 }
 
-impl<'a, T: Ident + 'a, C: 'a, U: 'a> Default for HeraldInfo<'a, T, C, U> {
-    #[inline(always)]
+pub struct HeraldImpl<'a, T: Herald<'a>> {
+    changes: Option<LocalSubject<'a, RefChangeEvent<'a, T>, ()>>,
+    batched_changes: Option<LocalCloneBoxOp<'a, RefChangeEvent<'a, T>, ()>>,
+}
+
+impl<'a, T: Herald<'a>> Default for HeraldImpl<'a, T> {
+    #[inline]
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[inline(always)]
-pub fn constrain_change_event_callback<F, T, C>(f: F) -> F
-where
-    F: for<'r> FnMut(ChangeEvent<'r, T, C>),
-{
-    f
-}
-
-impl<'a, T: Ident + 'a, C: 'a, U: 'a> HeraldInfo<'a, T, C, U> {
-    pub fn new() -> Self {
-        HeraldInfo {
+        HeraldImpl {
             changes: None,
-            events: Subject::local(),
+            batched_changes: None,
         }
-    }
-
-    /// return the batched changes, or defaults if no changes.
-    pub fn batched(&mut self) -> &mut C
-    where
-        C: Default,
-    {
-        if let Some(ref mut batched) = self.changes {
-            batched
-        } else {
-            self.changes = Some(C::default());
-            self.changes.as_mut().unwrap()
-        }
-    }
-
-    pub fn events_subject(
-        &mut self,
-    ) -> LocalSubject<'a, SubjectMutRefValue<EventData<'a, T, C, U>>, SubjectValue<()>> {
-        self.events.fork()
-    }
-
-    pub fn immediate_changes_events(
-        &self,
-    ) -> FilterMapOp<
-        LocalSubject<'a, SubjectMutRefValue<EventData<'a, T, C, U>>, SubjectValue<()>>,
-        for<'r> fn(&'r mut EventData<'a, T, C, U>) -> Option<ChangeEvent<'r, T, C>>,
-        &mut EventData<'a, T, C, U>,
-    > {
-        self.events.fork().filter_map(|ed| {
-            if let Event::ImmediateChange(ref mut chgs) = ed.event {
-                Some(ChangeEvent {
-                    host: ed.host,
-                    changes: chgs,
-                })
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn batched_changes_events(
-        &self,
-    ) -> FilterMapOp<
-        LocalSubject<'a, SubjectMutRefValue<EventData<'a, T, C, U>>, SubjectValue<()>>,
-        for<'r> fn(&'r mut EventData<'a, T, C, U>) -> Option<ChangeEvent<'r, T, C>>,
-        &mut EventData<'a, T, C, U>,
-    > {
-        self.events.fork().filter_map(|ed| {
-            if let Event::BatchedChange(ref mut chgs) = ed.event {
-                Some(ChangeEvent {
-                    host: ed.host,
-                    changes: chgs,
-                })
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn send_event(&mut self, host: &mut T, event: Event<C, U>) {
-        let from = host.uid();
-        // unsafe introduce:
-        // `events `(`Subject`) just emit the item, not care about `host` 's lifetime,
-        //  require `host` lifetime longer than `'a` because hold a PhantomData `T`.
-        let host = unsafe { std::mem::transmute(host) };
-        let mut data = EventData { host, from, event };
-        self.events.next(&mut data);
     }
 }
 
-#[test]
-fn test_lifetime() {
-    use crate::prelude::*;
-    struct Btn;
-    impl Ident for Btn {};
-    let mut btn = Btn;
-    let mut w: HeraldInfo<'_, Btn, (), ()> = HeraldInfo::new();
+impl<'a, T: Herald<'a> + 'a> HeraldImpl<'a, T> {
+    /// return an observable, which emit the host type changes. Use this subscribe the
+    /// host changes.
+    #[inline]
+    pub fn change_stream(&mut self) -> LocalSubject<'a, RefChangeEvent<'a, T>, ()> {
+        let changes = if let Some(ref changes) = self.changes {
+            changes.clone()
+        } else {
+            let changes = Subject::new();
+            self.changes = Some(changes.clone());
+            changes
+        };
+        changes
+    }
 
-    w.immediate_changes_events()
-        .subscribe((|_e: ChangeEvent<'_, _, _>| {}) as for<'r> fn(ChangeEvent<'r, _, _>));
-    w.send_event(&mut btn, Event::User(()));
+    /// like change_stream, but changes has batched by the `notifier`.
+    pub fn batched_change_stream(
+        &mut self,
+        notifier: impl LocalObservable<'a, Err = ()> + Clone + 'a,
+    ) -> LocalCloneBoxOp<'a, RefChangeEvent<'a, T>, ()> {
+        if let Some(ref batched) = self.batched_changes {
+            batched.clone()
+        } else {
+            let batched = self
+                .change_stream()
+                .clone()
+                .map(|v| Some(v))
+                .merge(notifier.map(|_| None))
+                // reset the scan operator when notify emit.
+                .scan_initial(None, |acc: Option<RefChangeEvent<'a, T>>, chgs_event| {
+                    if let Some(chgs) = chgs_event {
+                        if let Some(acc) = acc {
+                            acc.borrow_mut().changes.merge(&chgs.borrow().changes);
+                            Some(acc)
+                        } else {
+                            Some(chgs)
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .filter(|v| v.is_some())
+                .map(|v| v.unwrap())
+                // .sample(notifier)
+                .share()
+                .box_it();
+            self.batched_changes = Some(batched.clone());
+            batched
+        }
+    }
+
+    pub fn emit_change(&mut self, host: &mut T, changes: T::C) {
+        if let Some(ref mut subject) = self.changes {
+            if subject.subscribed_size() > 0 {
+                // unsafe introduce:
+                // `events `(`Subject`) just emit the item, not care about `host` 's lifetime,
+                //  require `host` lifetime longer than `'a` because hold a PhantomData `T`.
+                let host = unsafe { std::mem::transmute(host) };
+                subject.next(RefChangeEvent::new(host, changes))
+            }
+        }
+    }
+
+    pub fn is_subscribed(&self) -> bool {
+        self.changes
+            .as_ref()
+            .map_or(false, |s| s.subscribed_size() > 0)
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::prelude::*;
-
-    #[herald]
-    struct Button {
-        btns: f32,
-    }
-
-    #[test]
-    fn event_lifetime() {
-        let mut event_times = 0;
-        {
-            let mut btn = Button {
-                btns: 0.,
-                _herald_info: HeraldInfo::new(),
-            };
-
-            btn.herald().events_subject().subscribe(|_btns: &mut _| {
-                event_times += 1;
-            });
-
-            btn.send_event(Event::BatchedChange(ButtonChanges::default()));
-        }
-        assert_eq!(event_times, 1);
-    }
-
-    #[test]
-    fn update_state_should_emit_event() {
-        let mut event_times = 0;
-        {
-            let mut btn = Button {
-                btns: 0.,
-                _herald_info: HeraldInfo::new(),
-            };
-            let on_immediate_change =
-                constrain_change_event_callback(|chgs: ChangeEvent<'_, _, ButtonChanges>| {
-                    event_times += 1;
-                    let btns_chg = chgs.changes.btns.as_ref().unwrap();
-                    &assert_eq!(btns_chg.before, 0.);
-                    assert_eq!(btns_chg.after, 1.);
-                });
-            btn.herald()
-                .immediate_changes_events()
-                .subscribe(on_immediate_change);
-
-            let on_batched_event =
-                constrain_change_event_callback(|ce: ChangeEvent<'_, Button, ButtonChanges>| {
-                    ce.host.btns = 3.;
-                });
-            btn.update_states(ButtonStates { btns: Some(1.) });
-            btn.herald()
-                .batched_changes_events()
-                .subscribe(on_batched_event);
-        }
-        assert_eq!(event_times, 1);
-    }
-}
+mod tests {}
