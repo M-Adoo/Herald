@@ -114,7 +114,6 @@ impl<'a> CodeGen<'a> {
                     }
                 }
             }
-
             impl #state_impl_generic  Commit for #state_change #state_ty_generics #state_where_clause{
                 fn merge(&mut self, other: &Self) {
                     #(
@@ -161,18 +160,7 @@ impl<'a> CodeGen<'a> {
         let ty_changes = quote! {#state_change #state_ty_generics};
         quote! {
             impl #impl_generics #name #ty_generics #where_clause{
-
-                fn emit_change(&mut self, chgs: #state_change #state_ty_generics) {
-                    let info = unsafe { &mut *(&mut self.herald_impl as *mut HeraldImpl<'_, _>) };
-                    info.emit_change(self, chgs);
-                }
-            }
-
-            impl #impl_generics Herald<#c_life> for #name #ty_generics #where_clause{
-                type C = #ty_changes;
-                type State = #ty_states;
-
-                fn commit(&mut self, states: Self::State) {
+                fn set_state(&mut self, states: #ty_states) {
                     if self.herald_impl.is_subscribed() {
                         let mut chgs = #state_change::default();
                         let mut changed = false;
@@ -195,6 +183,16 @@ impl<'a> CodeGen<'a> {
                         )*
                     }
                 }
+
+                fn emit_change(&mut self, chgs: #state_change #state_ty_generics) {
+                    let info = unsafe { &mut *(&mut self.herald_impl as *mut HeraldImpl<'_, _>) };
+                    info.emit_change(self, chgs);
+                }
+            }
+
+            impl #impl_generics Herald<#c_life> for #name #ty_generics #where_clause{
+                type C = #ty_changes;
+
                 #[inline]
                 fn change_stream(&mut self) -> LocalSubject<#c_life, RefChangeEvent<#c_life, Self>, ()>
                 where

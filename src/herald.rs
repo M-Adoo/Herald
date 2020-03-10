@@ -10,8 +10,6 @@ pub trait Commit {
 
 pub trait Herald<'a> {
     type C: Commit + Default;
-    type State;
-    fn commit(&mut self, state: Self::State);
     fn change_stream(&mut self) -> LocalSubject<'a, RefChangeEvent<'a, Self>, ()>
     where
         Self: Sized;
