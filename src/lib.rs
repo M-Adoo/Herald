@@ -3,6 +3,5 @@
 pub mod herald;
 
 pub mod prelude {
-  pub use crate::herald;
   pub use crate::herald::*;
 }
