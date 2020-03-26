@@ -211,7 +211,7 @@ impl<'a, T: Herald<'a> + 'a> HeraldImpl<'a, T> {
         .change_stream()
         .clone()
         .map(|v| Some(v))
-        .merge(notifier.map(|_| None))
+        .merge(notifier.clone().map(|_| None))
         // reset the scan operator when notify emit.
         .scan_initial(None, |acc: Option<RefChangeEvent<'a, T>>, chgs_event| {
           if let Some(chgs) = chgs_event {
@@ -227,7 +227,7 @@ impl<'a, T: Herald<'a> + 'a> HeraldImpl<'a, T> {
         })
         .filter(|v| v.is_some())
         .map(|v| v.unwrap())
-        // .sample(notifier)
+        .sample(notifier)
         .share()
         .box_it();
       self.batched_changes = Some(batched.clone());
